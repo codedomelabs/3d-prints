@@ -28,10 +28,11 @@ OVERALL_HEIGHT_MM  = 160.0
 RADIUS_MM          = 40.0
 WALL_THICKNESS_MM  = 2.0
 CAP_HEIGHT_MM      = 18.0       # flattened dome height
-SEGMENTS           = 64
+SEGMENTS           = 128
 SUBDIVISIONS       = 4          # subdivision levels before classification (0-4)
                                 # higher = smoother boundaries, slower
 SEPARATE_PIECES    = True       # split into individual mesh objects
+CONTOUR_PADDING_MM = 7.0       # push edge contour points beyond capsule surface
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -113,6 +114,69 @@ MAROON_BOUNDARY = [
     [32.96, -68.18], [29.83, -71.46], [26.11, -74.31],
     [21.61, -76.72], [14.96, -78.91], [4.21, -80.22],
 ]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CONTOUR PADDING  –  push silhouette-adjacent points outward
+# ═══════════════════════════════════════════════════════════════
+
+def _capsule_silhouette_radius(z):
+    """Return the capsule's X-extent at height Z (the 2-D silhouette)."""
+    cap = CAP_HEIGHT_MM
+    cyl_half = (OVERALL_HEIGHT_MM - 2.0 * cap) / 2.0
+    r = RADIUS_MM
+
+    if abs(z) <= cyl_half:
+        return r
+    elif z > cyl_half:
+        dz = z - cyl_half
+        if dz >= cap:
+            return 0.0
+        cos_t = dz / cap
+        return r * math.sqrt(max(0.0, 1.0 - cos_t * cos_t))
+    else:
+        dz = -z - cyl_half
+        if dz >= cap:
+            return 0.0
+        cos_t = dz / cap
+        return r * math.sqrt(max(0.0, 1.0 - cos_t * cos_t))
+
+
+def pad_contour(contour, pad):
+    """
+    For each contour point that sits near the capsule silhouette,
+    push it outward so the contour extends *past* the capsule edge.
+    Interior points (well inside the capsule) are left unchanged.
+    """
+    cap = CAP_HEIGHT_MM
+    cyl_half = (OVERALL_HEIGHT_MM - 2.0 * cap) / 2.0
+    half_h = cyl_half + cap
+
+    out = []
+    for x, z in contour:
+        nx, nz = x, z
+
+        # ── X: push outward if close to silhouette radius ──
+        sil_r = _capsule_silhouette_radius(z)
+        if sil_r > 0 and abs(x) > sil_r - pad:
+            sign = 1.0 if x >= 0 else -1.0
+            nx = sign * (sil_r + pad)
+
+        # ── Z: push outward if close to top / bottom poles ──
+        if z > half_h - pad:
+            nz = half_h + pad
+        elif z < -half_h + pad:
+            nz = -half_h - pad
+
+        out.append([nx, nz])
+    return out
+
+
+# Apply padding to all contours at module load time
+BLUE_RED_MAIN   = pad_contour(BLUE_RED_MAIN,   CONTOUR_PADDING_MM)
+BLUE_RED_TONGUE = pad_contour(BLUE_RED_TONGUE,  CONTOUR_PADDING_MM)
+NAVY_BOUNDARY   = pad_contour(NAVY_BOUNDARY,    CONTOUR_PADDING_MM)
+MAROON_BOUNDARY = pad_contour(MAROON_BOUNDARY,  CONTOUR_PADDING_MM)
 
 
 # ═══════════════════════════════════════════════════════════════
