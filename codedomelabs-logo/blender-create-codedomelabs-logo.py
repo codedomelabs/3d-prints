@@ -33,6 +33,11 @@ SUBDIVISIONS       = 4          # smooth face classification
 CONTOUR_PADDING_MM = 7.0
 SEPARATE_PIECES    = True
 
+# Friction-fit lip (pen-cap style, top piece only)
+LIP_HEIGHT_MM      = 6.0        # how far the lip extends below the seam
+LIP_INSET_MM       = 0.3        # clearance gap so it slides on snugly
+LIP_Z_OFFSET_MM    = 14.0       # raise lip to meet navy piece's actual bottom edge
+
 MAT_DEFS = {
     "royal_blue":  "#2B4EA2",
     "dark_navy":   "#1B2A5B",
@@ -367,6 +372,87 @@ def build_capsule(name, height, radius, cap_h, segments):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  FRICTION-FIT LIP  (clean mesh built from contour data)
+# ═══════════════════════════════════════════════════════════════
+
+def build_lip_mesh(name, contour, capsule_radius, lip_height, lip_thickness, lip_inset, z_offset=0.0, segments=64):
+    """
+    Build a friction-fit lip as a clean standalone mesh.
+
+    The lip is a thin-walled strip that follows the navy boundary
+    contour, positioned just inside the capsule wall.  It's built
+    by revolving the contour's Z-values around the capsule axis,
+    but only where the contour runs along the capsule's outer edge
+    (i.e. the silhouette boundary, not the internal cuts).
+
+    Actually simpler: the lip is a thin cylindrical band that runs
+    around the full inner circumference of the navy piece's lower
+    boundary.  It's a short tube:
+      - outer radius = capsule_radius - wall_thickness - lip_inset
+      - inner radius = outer_r - lip_thickness
+      - height = lip_height
+      - positioned at the Z level where the navy boundary meets
+        the other pieces
+
+    This sits inside the wall gap and creates friction grip.
+    """
+    # Find the lowest Z point of the navy boundary contour
+    # — this is where the lip starts
+    navy_min_z = min(p[1] for p in contour)
+
+    bm = bmesh.new()
+
+    outer_r = capsule_radius - WALL_THICKNESS_MM - lip_inset
+    inner_r = outer_r - lip_thickness
+    top_z   = navy_min_z + z_offset
+    bot_z   = top_z - lip_height
+
+    # Build 4 rings of vertices
+    rings = []
+    for r, z in [(outer_r, top_z), (outer_r, bot_z),
+                 (inner_r, bot_z), (inner_r, top_z)]:
+        ring = []
+        for i in range(segments):
+            angle = 2.0 * math.pi * i / segments
+            v = bm.verts.new((r * math.cos(angle),
+                              r * math.sin(angle), z))
+            ring.append(v)
+        rings.append(ring)
+
+    # Connect rings into quads: outer wall, bottom, inner wall, top
+    for ring_a, ring_b in [(rings[0], rings[1]),   # outer wall
+                           (rings[1], rings[2]),   # bottom cap
+                           (rings[2], rings[3]),   # inner wall
+                           (rings[3], rings[0])]:  # top cap
+        for i in range(segments):
+            j = (i + 1) % segments
+            try:
+                bm.faces.new([ring_a[i], ring_a[j], ring_b[j], ring_b[i]])
+            except ValueError:
+                pass
+
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    mesh.update()
+    bm.free()
+
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
+def find_piece_by_material(pieces, mat_name_fragment):
+    """Find the piece whose material name contains the given fragment."""
+    for obj in pieces:
+        for slot in obj.material_slots:
+            if slot.material and mat_name_fragment in slot.material.name.lower():
+                return obj
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════
 
@@ -381,14 +467,14 @@ def main():
     seg = SEGMENTS
 
     # ── 1.  Build capsule (single-wall surface, NOT hollow) ────
-    print("[1/6]  Building capsule surface …")
+    print("[1/7]  Building capsule surface …")
     capsule = build_capsule("Capsule", h, r, cap, seg)
     bpy.context.view_layer.objects.active = capsule
     capsule.select_set(True)
 
     # ── 2.  Subdivide for smooth face classification ───────────
     if SUBDIVISIONS > 0:
-        print(f"[2/6]  Subdividing x{SUBDIVISIONS} …")
+        print(f"[2/7]  Subdividing x{SUBDIVISIONS} …")
         sub = capsule.modifiers.new("Subsurf", 'SUBSURF')
         sub.levels = SUBDIVISIONS
         sub.render_levels = SUBDIVISIONS
@@ -397,7 +483,7 @@ def main():
         print(f"       → {len(capsule.data.polygons)} faces")
 
     # ── 3.  Classify faces & assign materials ──────────────────
-    print("[3/6]  Classifying faces …")
+    print("[3/7]  Classifying faces …")
     mat_indices = {}
     for mat_name, hex_col in MAT_DEFS.items():
         mat = make_material(mat_name, hex_col)
@@ -416,7 +502,7 @@ def main():
 
     # ── 4.  Separate by material ───────────────────────────────
     if SEPARATE_PIECES:
-        print("[4/6]  Separating by material …")
+        print("[4/7]  Separating by material …")
         bpy.context.view_layer.objects.active = capsule
         capsule.select_set(True)
         bpy.ops.object.mode_set(mode='EDIT')
@@ -424,9 +510,9 @@ def main():
         bpy.ops.object.mode_set(mode='OBJECT')
 
     # ── 5.  Solidify each piece INDIVIDUALLY ───────────────────
-    #    This is the key: Solidify with use_rim=True creates
-    #    closed walls at every open edge automatically.
-    print("[5/6]  Hollowing each piece (Solidify) …")
+    #    Solidify with use_rim=True creates closed walls at every
+    #    open edge automatically.
+    print("[5/7]  Hollowing each piece (Solidify) …")
     pieces = [o for o in bpy.context.scene.objects if o.type == 'MESH']
     for obj in pieces:
         bpy.context.view_layer.objects.active = obj
@@ -441,8 +527,38 @@ def main():
         bpy.ops.object.modifier_apply(modifier=mod.name)
         obj.select_set(False)
 
-    # ── 6.  Fix normals ────────────────────────────────────────
-    print("[6/6]  Recalculating normals …")
+    # ── 6.  Add friction-fit lip to top (navy) piece ───────────
+    #    Built as a clean separate mesh, then joined to navy piece.
+    print("[6/7]  Adding friction-fit lip to navy piece …")
+    pieces = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+    navy_piece = find_piece_by_material(pieces, "navy")
+    if navy_piece:
+        lip = build_lip_mesh(
+            "Lip",
+            NAVY_BOUNDARY,
+            RADIUS_MM,
+            LIP_HEIGHT_MM,
+            WALL_THICKNESS_MM,
+            LIP_INSET_MM,
+            z_offset=LIP_Z_OFFSET_MM,
+            segments=SEGMENTS,
+        )
+        # Copy navy material to lip
+        if navy_piece.data.materials:
+            lip.data.materials.append(navy_piece.data.materials[0])
+
+        # Join lip to navy piece
+        bpy.ops.object.select_all(action='DESELECT')
+        lip.select_set(True)
+        navy_piece.select_set(True)
+        bpy.context.view_layer.objects.active = navy_piece
+        bpy.ops.object.join()
+        print(f"       Lip joined to {navy_piece.name}")
+    else:
+        print("       ⚠ Could not find navy piece for lip")
+
+    # ── 7.  Fix normals ────────────────────────────────────────
+    print("[7/7]  Recalculating normals …")
     for obj in pieces:
         bpy.context.view_layer.objects.active = obj
         obj.select_set(True)
